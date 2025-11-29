@@ -3,140 +3,103 @@ import logging
 import requests
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
-from dotenv import load_dotenv
 import google.generativeai as genai
 import uvicorn
+from dotenv import load_dotenv
 
-# ======================================================
-# 1) Logging
-# ======================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+# Logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ======================================================
-# 2) Load ENV Variables
-# ======================================================
 load_dotenv()
 
 FACEBOOK_VERIFY_TOKEN = os.getenv("FACEBOOK_VERIFY_TOKEN")
 FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# ======================================================
-# 3) Configure Gemini
-# ======================================================
+# Gemini
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel("gemini-1.5-flash")
-    logger.info("✅ Gemini configured successfully")
 else:
-    logger.error("❌ Missing GEMINI_API_KEY")
+    logger.error("NO GEMINI API KEY FOUND!")
 
-# ======================================================
-# 4) Initialize FastAPI App
-# ======================================================
 app = FastAPI()
 
-# ======================================================
-# 5) Health Check (Railway Needs This)
-# ======================================================
+# -------------------------
+# MAIN HEALTH CHECK (FIX)
+# -------------------------
 @app.get("/")
 async def home():
-    return {"status": "alive", "message": "Bot running successfully"}
+    return {"status": "alive", "msg": "Bot running successfully"}
 
-# ======================================================
-# 6) Webhook Verification
-# ======================================================
+# -------------------------
+# VERIFY FACEBOOK WEBHOOK
+# -------------------------
 @app.get("/webhook")
-async def verify_webhook(request: Request):
+async def verify(request: Request):
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
 
-    if mode and token:
-        if mode == "subscribe" and token == FACEBOOK_VERIFY_TOKEN:
-            return int(challenge)
-        else:
-            raise HTTPException(status_code=403, detail="Verification failed")
+    if mode == "subscribe" and token == FACEBOOK_VERIFY_TOKEN:
+        return int(challenge)
+    else:
+        raise HTTPException(status_code=403)
 
-    return {"status": "missing_params"}
-
-# ======================================================
-# 7) Receive Messages
-# ======================================================
+# -------------------------
+# MESSAGE HANDLER
+# -------------------------
 @app.post("/webhook")
-async def webhook_handler(request: Request):
+async def webhook(request: Request):
     body = await request.json()
 
     if body.get("object") == "page":
-        for entry in body.get("entry", []):
-            for event in entry.get("messaging", []):
+        for entry in body["entry"]:
+            for messaging_event in entry["messaging"]:
+                if "message" in messaging_event and "text" in messaging_event["message"]:
+                    sender = messaging_event["sender"]["id"]
+                    text = messaging_event["message"]["text"]
+                    reply = ai_reply(text)
+                    send_fb_message(sender, reply)
 
-                if "message" in event and "text" in event["message"]:
-                    sender_id = event["sender"]["id"]
-                    text = event["message"]["text"]
+    return JSONResponse({"status": "ok"})
 
-                    reply = generate_reply(text)
-                    send_message(sender_id, reply)
-
-        return JSONResponse({"status": "ok"}, status_code=200)
-
-    raise HTTPException(status_code=404, detail="Not a page event")
-
-# ======================================================
-# 8) AI Reply
-# ======================================================
-def generate_reply(user_text):
-    company_data = ""
-
-    if os.path.exists("data.txt"):
-        with open("data.txt", "r", encoding="utf-8") as f:
-            company_data = f.read()
-
-    prompt = f"""
-    أنت مساعد خدمة عملاء لــ "حلويات مصر".
-    استخدم البيانات التالية:
-    {company_data}
-
-    - جاوب باختصار وبأسلوب محترم جدًا.
-    - استخدم لهجة مصرية بسيطة.
-    - لا تخترع معلومات غير موجودة.
-
-    سؤال العميل: {user_text}
-    """
-
+# -------------------------
+# AI REPLY
+# -------------------------
+def ai_reply(user_text):
     try:
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        data = ""
+        if os.path.exists("data.txt"):
+            data = open("data.txt", encoding="utf8").read()
+
+        prompt = f"""
+        انت بوت خدمة عملاء حلويات مصر.
+        استخدم المعلومات التالية فقط:
+
+        {data}
+
+        رد على سؤال العميل: {user_text}
+        """
+
+        result = model.generate_content(prompt)
+        return result.text.strip()
     except:
-        return "حاضر يا فندم، بس فيه مشكلة بسيطة دلوقتي. حاول تاني بعد دقيقة ❤️"
+        return "حصل مشكلة مؤقتاً يا فندم، حاول تاني ❤️"
 
-# ======================================================
-# 9) Send reply to Facebook
-# ======================================================
-def send_message(recipient_id, text):
-    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={FACEBOOK_PAGE_ACCESS_TOKEN}"
+# -------------------------
+# SEND TO FACEBOOK
+# -------------------------
+def send_fb_message(user, text):
+    url = f"https://graph.facebook.com/v19.0/me/messages"
+    params = {"access_token": FACEBOOK_PAGE_ACCESS_TOKEN}
+    data = {"recipient": {"id": user}, "message": {"text": text}}
+    requests.post(url, params=params, json=data)
 
-    payload = {
-        "recipient": {"id": recipient_id},
-        "message": {"text": text}
-    }
-
-    try:
-        r = requests.post(url, json=payload)
-        if r.status_code != 200:
-            logger.error(f"FB Error: {r.text}")
-    except Exception as e:
-        logger.error(f"FB send error: {e}")
-
-# ======================================================
-# 10) Start App (Railway)
-# ======================================================
+# -------------------------
+# FORCE RAILWAY PORT FIX
+# -------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    logger.info(f"🚀 Running on port {port}")
+    port = int(os.getenv("PORT", 5000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
